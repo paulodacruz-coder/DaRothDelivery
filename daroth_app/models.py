@@ -39,7 +39,7 @@ class Producto(models.Model):
         return self.nombre
 
 class Cliente(models.Model):
-    nombre = models.CharField(max_length=100, unique=True)
+    nombre = models.CharField(max_length=100)
     telefono = models.CharField(max_length=30, blank=True)
     direccion = models.CharField(max_length=200)
     zona = models.ForeignKey(Zona, on_delete=models.PROTECT, related_name="clientes")
@@ -58,7 +58,7 @@ class Repartidor(models.Model):
         EN_REPARTO = "EN_REPARTO", "En reparto"
         INACTIVO = "INACTIVO", "Inactivo"
 
-    nombre = models.CharField(max_length=100, unique=True)
+    nombre = models.CharField(max_length=100)
     telefono = models.CharField(max_length=30, blank=True)
     vehiculo = models.CharField(max_length=30, default="moto")
     estado = models.CharField(max_length=20, choices=Estado.choices, default=Estado.DISPONIBLE)
@@ -108,7 +108,7 @@ class DetallePedido(models.Model):
         constraints = [models.UniqueConstraint(fields=["pedido", "producto"], name="uq_detalle_pedido_producto")]
 
     def __str__(self):
-        return self.pedido
+        return f"Pedido#{self.pedido_id} - {self.producto.nombre}"
 
 class HistorialEstado(models.Model):
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, related_name="historial")
@@ -122,7 +122,7 @@ class HistorialEstado(models.Model):
         ordering = ["pedido"]
 
     def __str__(self):
-        return self.pedido
+        return f"Pedido#{self.pedido.id} - {self.estado.nombre}"
 
 class Alerta(models.Model):
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, related_name="alertas")
@@ -137,7 +137,7 @@ class Alerta(models.Model):
         ordering = ["pedido"]
 
     def __str__(self):
-        return self.pedido
+        return f"Pedido#{self.pedido.id} - {self.mensaje}"
 
 class Perfil(models.Model):
     class Rol(models.TextChoices):
