@@ -20,8 +20,8 @@ Los restaurantes chicos asignan los pedidos "a ojo", no saben qué repartidor ll
 
 ```bash
 # 1. Clonar el repositorio y entrar a la carpeta
-git clone https://github.com/<usuario>/daroth-delivery.git
-cd daroth-delivery
+git clone https://github.com/paulodacruz-coder/DaRothDelivery.git
+cd DaRothDelivery
 
 # 2. Crear y activar el entorno virtual
 python -m venv env
@@ -39,13 +39,40 @@ pip install -r requirements.txt
 
 # 6. Crear las tablas y cargar los datos iniciales
 python manage.py migrate
-python manage.py cargar_datos
+python manage.py cargar_datos          # --reset para borrar y volver a cargar
 
 # 7. Levantar el servidor
 python manage.py runserver
+
+# Pruebas automáticas
+python manage.py test daroth_app
 ```
 
-La API queda disponible en `http://127.0.0.1:8000/api/`.
+La API queda disponible en `http://127.0.0.1:8000/api/` y el panel de administración en `/admin/`.
+
+Usuarios de prueba (contraseña `daroth123`): `paulo` y `aixa` son administradores;
+`marcos`, `julieta`, `federico`, `camila`, `nicolas`, `rocio`, `diego` y `valeria` son encargados.
+
+## API
+
+Todos los endpoints exigen autenticación con el encabezado `Authorization: Token <token>`,
+que se obtiene en el login.
+
+| Método | Ruta | Descripción |
+| --- | --- | --- |
+| POST | `/api/auth/login/` | Recibe `username` y `password`, devuelve el token y el rol |
+| POST | `/api/auth/logout/` | Invalida el token |
+| GET | `/api/auth/yo/` | Usuario autenticado |
+| CRUD | `/api/zonas/`, `/api/productos/`, `/api/repartidores/` | Catálogo (solo el administrador modifica) |
+| CRUD | `/api/clientes/` | Clientes (`?q=` busca por nombre o teléfono) |
+| CRUD | `/api/pedidos/` | Pedidos (`?estado=`, `?zona=`, `?repartidor=`) |
+
+Alta de un pedido: el total, la zona, el tiempo estimado y el token de seguimiento los calcula el sistema.
+
+```json
+POST /api/pedidos/
+{ "cliente": 1, "items": [ { "producto": 3, "cantidad": 2 } ] }
+```
 
 ## Variables de entorno
 
@@ -62,12 +89,19 @@ La API queda disponible en `http://127.0.0.1:8000/api/`.
 ## Estructura
 
 ```
-daroth-delivery/
+DaRothDelivery/
 ├── manage.py
 ├── requirements.txt
-├── database/          Configuración del proyecto (settings, urls)
-├── daroth_app/        Modelos, serializers, vistas y endpoints
-└── docs/              DER, diagramas y documentación del trabajo
+├── .env.example       Plantilla de variables de entorno
+└── daroth_app/        Proyecto y aplicación Django
+    ├── settings.py, urls.py, wsgi.py, asgi.py
+    ├── models.py      Modelo de datos (DER)
+    ├── services.py    Reglas de negocio
+    ├── serializers.py, views.py, permissions.py
+    ├── admin.py
+    ├── migrations/
+    ├── management/commands/cargar_datos.py
+    └── tests/         Pruebas automáticas, un archivo por sprint
 ```
 
 ## Estado del proyecto
@@ -76,7 +110,7 @@ El desarrollo está organizado en cinco sprints de una semana:
 
 | Sprint | Alcance | Estado |
 | --- | --- | --- |
-| 1 | Base del sistema y persistencia | En curso |
+| 1 | Base del sistema y persistencia | Terminado |
 | 2 | Estados del pedido y asignación de repartidores | Pendiente |
 | 3 | Seguimiento del pedido para el cliente | Pendiente |
 | 4 | Asignación inteligente y optimización | Pendiente |

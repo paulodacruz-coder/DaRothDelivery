@@ -1,3 +1,5 @@
+import secrets
+
 from django.conf import settings
 from django.core.validators import MinValueValidator
 from django.db import models
@@ -93,7 +95,21 @@ class Pedido(models.Model):
         ordering = ["fecha_creacion"]
 
     def __str__(self):
-        return self.estado
+        return f"Pedido #{self.pk} - {self.cliente.nombre}"
+
+    def save(self, *args, **kwargs):
+        # El token se genera una sola vez, al crear el pedido.
+        if not self.token_seguimiento:
+            self.token_seguimiento = generar_token_unico()
+        super().save(*args, **kwargs)
+
+
+def generar_token_unico():
+    """Devuelve un token hexadecimal de 32 caracteres que no esté en uso."""
+    while True:
+        token = secrets.token_hex(16)
+        if not Pedido.objects.filter(token_seguimiento=token).exists():
+            return token
 
 class DetallePedido(models.Model):
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, related_name="detalles")
@@ -102,13 +118,13 @@ class DetallePedido(models.Model):
     precio_unitario = models.DecimalField(max_digits=12, decimal_places=2)
 
     class Meta:
-        verbose_name = "DetallePedido"
-        verbose_name_plural = "DetallePedidos"
+        verbose_name = "Detalle de pedido"
+        verbose_name_plural = "Detalles de pedido"
         ordering = ["pedido"]
         constraints = [models.UniqueConstraint(fields=["pedido", "producto"], name="uq_detalle_pedido_producto")]
 
     def __str__(self):
-        return f"Pedido#{self.pedido_id} - {self.producto.nombre}"
+        return f"Pedido #{self.pedido_id} - {self.producto.nombre}"
 
 class HistorialEstado(models.Model):
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, related_name="historial")
@@ -117,12 +133,12 @@ class HistorialEstado(models.Model):
     fecha_hora = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        verbose_name = "HistorialEstado"
-        verbose_name_plural = "HistorialEstados"
-        ordering = ["pedido"]
+        verbose_name = "Historial de estado"
+        verbose_name_plural = "Historial de estados"
+        ordering = ["pedido", "fecha_hora"]
 
     def __str__(self):
-        return f"Pedido#{self.pedido.id} - {self.estado.nombre}"
+        return f"Pedido #{self.pedido_id} - {self.get_estado_display()}"
 
 class Alerta(models.Model):
     pedido = models.ForeignKey(Pedido, on_delete=models.CASCADE, related_name="alertas")
@@ -137,7 +153,7 @@ class Alerta(models.Model):
         ordering = ["pedido"]
 
     def __str__(self):
-        return f"Pedido#{self.pedido.id} - {self.mensaje}"
+        return f"Pedido #{self.pedido_id} - {self.mensaje}"
 
 class Perfil(models.Model):
     class Rol(models.TextChoices):
@@ -153,4 +169,4 @@ class Perfil(models.Model):
         ordering = ["rol"]
 
     def __str__(self):
-        return self.user
+        return f"{self.user.username} ({self.get_rol_display()})"
