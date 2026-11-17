@@ -7,7 +7,7 @@ from drf_spectacular.utils import extend_schema, inline_serializer
 from rest_framework import mixins, serializers, status, viewsets
 from rest_framework.authtoken.models import Token
 from rest_framework.decorators import action
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
 from rest_framework.throttling import ScopedRateThrottle
@@ -18,11 +18,11 @@ from .excepciones import Conflicto
 from .models import Alerta, Cliente, EstadoPedido, Pedido, Producto, Repartidor, Zona
 from .permissions import EsAdministradorOSoloLectura
 from .serializers import (
-    AsignacionSerializer, CambioEstadoSerializer, ClienteSerializer,
+    AsignacionSerializer, CambioEstadoSerializer, ClienteSerializer, DisponibilidadSerializer,
     HistorialEstadoSerializer, LoginSerializer, PedidoActualizarSerializer,
     PedidoCrearSerializer, PedidoResumenSerializer, PedidoSerializer, ProductoSerializer,
-    RepartidorCargaSerializer, RepartidorSerializer, SeguimientoSerializer, UsuarioSerializer,
-    ZonaSerializer,
+    RepartidorCargaSerializer, RepartidorSerializer, SeguimientoSerializer,
+    SugerenciaSerializer, UbicacionSerializer, UsuarioSerializer, ZonaSerializer,
 )
 
 # Respuesta de error de negocio (ver excepciones.py), para la documentación.
@@ -93,6 +93,13 @@ class ProductoViewSet(BorradoProtegidoMixin, viewsets.ModelViewSet):
 
 
 class RepartidorViewSet(viewsets.ModelViewSet):
+    """
+    CRUD de repartidores (solo el administrador modifica). Filtro: ?estado=DISPONIBLE
+
+    Acciones de la operación diaria, que puede hacer también el encargado:
+      POST /repartidores/{id}/ubicacion/       {"latitud": ..., "longitud": ...}
+      POST /repartidores/{id}/disponibilidad/  {"estado": "DISPONIBLE" | "INACTIVO"}
+    """
     serializer_class = RepartidorSerializer
     permission_classes = [EsAdministradorOSoloLectura]
 
@@ -102,6 +109,34 @@ class RepartidorViewSet(viewsets.ModelViewSet):
         if estado:
             qs = qs.filter(estado=estado.upper())
         return qs
+
+    def get_serializer_class(self):
+        return {
+            "ubicacion": UbicacionSerializer,
+            "disponibilidad": DisponibilidadSerializer,
+        }.get(self.action, RepartidorSerializer)
+
+    def perform_destroy(self, instance):
+        if services.pedidos_activos_de(instance).exists():
+            raise Conflicto(f"{instance.nombre} tiene pedidos sin entregar: no se puede borrar.")
+        instance.delete()
+
+    @extend_schema(responses={200: RepartidorSerializer})
+    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated])
+    def ubicacion(self, request, pk=None):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        repartidor = services.actualizar_ubicacion(self.get_object(), **serializer.validated_data)
+        return Response(RepartidorSerializer(repartidor).data)
+
+    @extend_schema(responses={200: RepartidorSerializer, 409: RESPUESTA_409})
+    @action(detail=True, methods=["post"], permission_classes=[IsAuthenticated])
+    def disponibilidad(self, request, pk=None):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        repartidor = services.cambiar_disponibilidad(self.get_object(),
+                                                     serializer.validated_data["estado"])
+        return Response(RepartidorSerializer(repartidor).data)
 
 
 class ClienteViewSet(BorradoProtegidoMixin, viewsets.ModelViewSet):
@@ -131,6 +166,8 @@ class PedidoViewSet(mixins.CreateModelMixin, mixins.ListModelMixin,
       POST /pedidos/{id}/estado/       {"estado": "PREPARANDO"}  avanza al estado siguiente
       GET  /pedidos/{id}/historial/                              historial de estados
       POST /pedidos/{id}/asignar/      {"repartidor": 3}         asignación manual
+      POST /pedidos/{id}/asignar/      {"automatica": true}      asigna el mejor del ranking
+      GET  /pedidos/{id}/sugerencia/                             ranking de repartidores
       POST /pedidos/{id}/desasignar/                             quita el repartidor
     """
 
@@ -186,9 +223,28 @@ class PedidoViewSet(mixins.CreateModelMixin, mixins.ListModelMixin,
     def asignar(self, request, pk=None):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        pedido = services.asignar_repartidor(self.get_object(),
-                                             serializer.validated_data["repartidor"])
+        if serializer.validated_data["automatica"]:
+            pedido = services.asignar_automaticamente(self.get_object())
+        else:
+            pedido = services.asignar_repartidor(self.get_object(),
+                                                 serializer.validated_data["repartidor"])
         return self._responder_pedido(pedido)
+
+    @extend_schema(responses={200: SugerenciaSerializer, 409: RESPUESTA_409})
+    @action(detail=True, methods=["get"], pagination_class=None)
+    def sugerencia(self, request, pk=None):
+        """Ranking de repartidores para el pedido, del más conveniente al menos conveniente."""
+        pedido = self.get_object()
+        sugerencia = services.sugerir_repartidor(pedido)
+        return Response(SugerenciaSerializer({
+            "pedido": pedido.pk,
+            "zona": pedido.zona.nombre,
+            "estrategia": sugerencia.estrategia.nombre,
+            "criterio": sugerencia.estrategia.criterio,
+            "repartidor_actual": pedido.repartidor_id,
+            "ranking": sugerencia.ranking,
+            "descartados": sugerencia.descartados,
+        }).data)
 
     @extend_schema(request=None, responses={200: PedidoSerializer, 409: RESPUESTA_409})
     @action(detail=True, methods=["post"])

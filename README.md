@@ -70,14 +70,21 @@ que se obtiene en el login. La única excepción es el seguimiento público.
 | CRUD | `/api/pedidos/` | Pedidos (`?estado=`, `?zona=`, `?repartidor=`, `?activos=1`) |
 | POST | `/api/pedidos/{id}/estado/` | Avanza al estado siguiente: `{"estado": "PREPARANDO"}` |
 | GET | `/api/pedidos/{id}/historial/` | Historial de estados del pedido |
-| POST | `/api/pedidos/{id}/asignar/` | Asignación manual: `{"repartidor": 3}` |
+| GET | `/api/pedidos/{id}/sugerencia/` | Ranking de repartidores para el pedido, con el desglose del puntaje |
+| POST | `/api/pedidos/{id}/asignar/` | Manual: `{"repartidor": 3}` · Automática: `{"automatica": true}` |
 | POST | `/api/pedidos/{id}/desasignar/` | Quita el repartidor |
+| POST | `/api/repartidores/{id}/ubicacion/` | Posición actual: `{"latitud": -34.58, "longitud": -58.43}` |
+| POST | `/api/repartidores/{id}/disponibilidad/` | Turno: `{"estado": "DISPONIBLE"}` o `"INACTIVO"` |
 | GET | `/api/dashboard/` | Pedidos activos, carga de repartidores y números del día |
 | GET | `/api/seguimiento/{token}/` | **Público.** Estado, historial y minutos restantes del pedido |
 
 Los estados avanzan en orden (Pendiente → Preparando → Listo → En camino → Entregado),
 sin saltear ni retroceder, y no se despacha un pedido sin repartidor. Una operación que no
 corresponde al estado actual responde **409 Conflict**.
+
+La sugerencia de repartidor usa el patrón Strategy (`asignacion.py`). La estrategia actual
+puntúa `distancia_km a la zona + 2 × pedidos activos − 1,5 si ya va a esa zona` (menor es
+mejor) y solo considera repartidores disponibles, con lugar y con ubicación conocida.
 
 Cada pedido trae un `enlace_seguimiento` para mandarle al cliente. Esa página no pide login,
 muestra solo el estado y el tiempo restante (ningún dato interno) y admite hasta 30
@@ -113,6 +120,7 @@ DaRothDelivery/
     ├── settings.py, urls.py, wsgi.py, asgi.py
     ├── models.py      Modelo de datos (DER)
     ├── services.py    Reglas de negocio
+    ├── asignacion.py  Asignación inteligente (patrón Strategy)
     ├── serializers.py, views.py, permissions.py
     ├── admin.py
     ├── migrations/
@@ -129,7 +137,7 @@ El desarrollo está organizado en cinco sprints de una semana:
 | 1 | Base del sistema y persistencia | Terminado |
 | 2 | Estados del pedido y asignación de repartidores | Terminado |
 | 3 | Seguimiento del pedido para el cliente | Terminado |
-| 4 | Asignación inteligente y optimización | Pendiente |
+| 4 | Asignación inteligente y optimización | Terminado |
 | 5 | Estadísticas y reportes | Pendiente |
 
 ## Documentación

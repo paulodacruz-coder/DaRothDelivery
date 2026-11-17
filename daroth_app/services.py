@@ -13,6 +13,7 @@ from decimal import Decimal
 from django.db import transaction
 from django.utils import timezone
 
+from .asignacion import ESTRATEGIA_POR_DEFECTO
 from .models import DetallePedido, EstadoPedido, HistorialEstado, Pedido, Repartidor
 
 
@@ -185,6 +186,29 @@ def asignar_repartidor(pedido, repartidor):
     return pedido
 
 
+def sugerir_repartidor(pedido, estrategia=None):
+    """
+    Ranking de repartidores para un pedido que todavía está en el local, según la
+    estrategia de asignación (por defecto, cercanía y carga).
+    """
+    if pedido.estado not in ESTADOS_EN_LOCAL:
+        raise ReglaDeNegocioError("El pedido ya salió del local: no se puede cambiar el repartidor.")
+    return (estrategia or ESTRATEGIA_POR_DEFECTO()).sugerir(pedido)
+
+
+@transaction.atomic
+def asignar_automaticamente(pedido, estrategia=None):
+    """Asigna el primer repartidor del ranking. 409 si nadie puede llevar el pedido."""
+    pedido = Pedido.objects.select_for_update().select_related("zona").get(pk=pedido.pk)
+    mejor = sugerir_repartidor(pedido, estrategia).mejor
+    if mejor is None:
+        raise ReglaDeNegocioError(
+            "No hay repartidores disponibles para este pedido: todos están ocupados, "
+            "inactivos, con la capacidad completa o sin ubicación.")
+    # asignar_repartidor vuelve a validar estado y capacidad con las filas bloqueadas.
+    return asignar_repartidor(pedido, mejor.repartidor)
+
+
 @transaction.atomic
 def desasignar_repartidor(pedido):
     """Quita el repartidor de un pedido que todavía está en el local."""
@@ -194,6 +218,52 @@ def desasignar_repartidor(pedido):
     pedido.repartidor = None
     pedido.save(update_fields=["repartidor"])
     return pedido
+
+
+# ---------------------------------------------------------------------------
+# Ubicación y disponibilidad del repartidor
+# ---------------------------------------------------------------------------
+
+def actualizar_ubicacion(repartidor, latitud, longitud):
+    """Registra la posición actual del repartidor (la envía su app o el encargado)."""
+    repartidor.latitud = latitud
+    repartidor.longitud = longitud
+    repartidor.save(update_fields=["latitud", "longitud"])
+    return repartidor
+
+
+@transaction.atomic
+def cambiar_disponibilidad(repartidor, nuevo_estado):
+    """
+    Marca al repartidor como DISPONIBLE (empieza su turno) o INACTIVO (lo termina).
+
+    Reglas:
+    - EN_REPARTO no se elige a mano: lo maneja la máquina de estados del pedido.
+    - No se puede dar de baja a alguien con pedidos asignados sin entregar:
+      primero hay que entregarlos o reasignarlos.
+    - Mientras está en reparto no se lo puede volver a DISPONIBLE: vuelve solo
+      al entregar su último pedido.
+    """
+    repartidor = Repartidor.objects.select_for_update().get(pk=repartidor.pk)
+    if nuevo_estado == Repartidor.Estado.EN_REPARTO:
+        raise ReglaDeNegocioError(
+            "El estado «En reparto» lo asigna el sistema cuando el repartidor sale con un pedido.")
+    if repartidor.estado == nuevo_estado:
+        return repartidor
+
+    if nuevo_estado == Repartidor.Estado.INACTIVO:
+        pendientes = pedidos_activos_de(repartidor).count()
+        if pendientes:
+            raise ReglaDeNegocioError(
+                f"{repartidor.nombre} tiene {pendientes} pedido(s) asignado(s) sin entregar: "
+                "entregalos o reasignalos antes de darlo de baja.")
+    elif repartidor.estado == Repartidor.Estado.EN_REPARTO:
+        raise ReglaDeNegocioError(
+            f"{repartidor.nombre} está en reparto: vuelve a «Disponible» solo al entregar.")
+
+    repartidor.estado = nuevo_estado
+    repartidor.save(update_fields=["estado"])
+    return repartidor
 
 
 # ---------------------------------------------------------------------------

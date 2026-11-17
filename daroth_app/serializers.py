@@ -79,6 +79,34 @@ class RepartidorSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError("La capacidad debe ser al menos 1.")
         return valor
 
+    def validate_estado(self, valor):
+        # El estado tiene reglas propias (ver services.cambiar_disponibilidad):
+        # una vez creado el repartidor, se cambia solo por /disponibilidad/.
+        if self.instance is not None and valor != self.instance.estado:
+            raise serializers.ValidationError(
+                "El estado se cambia con POST /api/repartidores/{id}/disponibilidad/.")
+        if self.instance is None and valor == Repartidor.Estado.EN_REPARTO:
+            raise serializers.ValidationError("Un repartidor nuevo no puede estar en reparto.")
+        return valor
+
+    def validate(self, datos):
+        validar_coordenadas(datos, "latitud", "longitud")
+        return datos
+
+
+def validar_coordenadas(datos, campo_lat, campo_lon):
+    """Rango válido de latitud y longitud, y que vengan las dos juntas o ninguna."""
+    errores = {}
+    lat, lon = datos.get(campo_lat), datos.get(campo_lon)
+    if lat is not None and not -90 <= lat <= 90:
+        errores[campo_lat] = "La latitud debe estar entre -90 y 90."
+    if lon is not None and not -180 <= lon <= 180:
+        errores[campo_lon] = "La longitud debe estar entre -180 y 180."
+    if (campo_lat in datos) != (campo_lon in datos):
+        errores["detail"] = "La latitud y la longitud se envían juntas."
+    if errores:
+        raise serializers.ValidationError(errores)
+
 
 class ClienteSerializer(serializers.ModelSerializer):
     zona_nombre = serializers.CharField(source="zona.nombre", read_only=True)
@@ -207,7 +235,19 @@ class CambioEstadoSerializer(serializers.Serializer):
 
 
 class AsignacionSerializer(serializers.Serializer):
-    repartidor = serializers.PrimaryKeyRelatedField(queryset=Repartidor.objects.all())
+    """
+    Manual: {"repartidor": 3}.
+    Automática (Sprint 4): {"automatica": true}, asigna el primero del ranking de sugerencias.
+    """
+    repartidor = serializers.PrimaryKeyRelatedField(queryset=Repartidor.objects.all(),
+                                                    required=False)
+    automatica = serializers.BooleanField(default=False)
+
+    def validate(self, datos):
+        if datos["automatica"] == ("repartidor" in datos):
+            raise serializers.ValidationError(
+                "Indicá un repartidor o pedí la asignación automática, una de las dos.")
+        return datos
 
 
 class PedidoResumenSerializer(serializers.ModelSerializer):
@@ -246,6 +286,60 @@ class RepartidorCargaSerializer(serializers.ModelSerializer):
         model = Repartidor
         fields = ["id", "nombre", "vehiculo", "estado", "estado_display",
                   "pedidos_activos", "capacidad_max"]
+
+
+# ---------------------------------------------------------------------------
+# Sprint 4: ubicación, disponibilidad y asignación inteligente
+# ---------------------------------------------------------------------------
+
+class UbicacionSerializer(serializers.Serializer):
+    latitud = serializers.DecimalField(max_digits=9, decimal_places=6)
+    longitud = serializers.DecimalField(max_digits=9, decimal_places=6)
+
+    def validate(self, datos):
+        validar_coordenadas(datos, "latitud", "longitud")
+        return datos
+
+
+class DisponibilidadSerializer(serializers.Serializer):
+    """DISPONIBLE (empieza el turno) o INACTIVO (lo termina)."""
+    estado = serializers.ChoiceField(choices=[Repartidor.Estado.DISPONIBLE,
+                                              Repartidor.Estado.INACTIVO])
+
+
+class CandidatoSerializer(serializers.Serializer):
+    """Un puesto del ranking, con el desglose del puntaje para que se entienda la sugerencia."""
+    posicion = serializers.IntegerField()
+    repartidor = serializers.IntegerField(source="repartidor.pk")
+    nombre = serializers.CharField(source="repartidor.nombre")
+    vehiculo = serializers.CharField(source="repartidor.vehiculo")
+    puntaje = serializers.FloatField()
+    distancia_km = serializers.FloatField()
+    pedidos_activos = serializers.IntegerField()
+    capacidad_max = serializers.IntegerField(source="repartidor.capacidad_max")
+    misma_zona = serializers.BooleanField()
+
+    def to_representation(self, candidato):
+        datos = super().to_representation(candidato)
+        datos["puntaje"] = round(candidato.puntaje, 2)
+        datos["distancia_km"] = round(candidato.distancia_km, 2)
+        return datos
+
+
+class DescartadoSerializer(serializers.Serializer):
+    repartidor = serializers.IntegerField(source="repartidor.pk")
+    nombre = serializers.CharField(source="repartidor.nombre")
+    motivo = serializers.CharField()
+
+
+class SugerenciaSerializer(serializers.Serializer):
+    pedido = serializers.IntegerField()
+    zona = serializers.CharField()
+    estrategia = serializers.CharField()
+    criterio = serializers.CharField()
+    repartidor_actual = serializers.IntegerField(allow_null=True)
+    ranking = CandidatoSerializer(many=True)
+    descartados = DescartadoSerializer(many=True)
 
 
 # ---------------------------------------------------------------------------
