@@ -3,7 +3,8 @@ from rest_framework import serializers
 
 from . import services
 from .models import (
-    Alerta, Cliente, DetallePedido, HistorialEstado, Pedido, Producto, Repartidor, Zona,
+    Alerta, Cliente, DetallePedido, EstadoPedido, HistorialEstado, Pedido, Producto,
+    Repartidor, Zona,
 )
 
 
@@ -123,6 +124,7 @@ class PedidoSerializer(serializers.ModelSerializer):
     repartidor_nombre = serializers.CharField(source="repartidor.nombre", read_only=True, default=None)
     usuario = serializers.CharField(source="usuario.username", read_only=True)
     estado_display = serializers.CharField(source="get_estado_display", read_only=True)
+    siguiente_estado = serializers.SerializerMethodField()
     detalles = DetallePedidoSerializer(many=True, read_only=True)
     historial = HistorialEstadoSerializer(many=True, read_only=True)
 
@@ -130,10 +132,13 @@ class PedidoSerializer(serializers.ModelSerializer):
         model = Pedido
         fields = ["id", "cliente", "cliente_nombre", "zona", "zona_nombre",
                   "repartidor", "repartidor_nombre", "usuario", "direccion_entrega",
-                  "estado", "estado_display", "total", "tiempo_estimado_min",
-                  "token_seguimiento", "fecha_creacion", "fecha_entrega",
-                  "detalles", "historial"]
+                  "estado", "estado_display", "siguiente_estado", "total",
+                  "tiempo_estimado_min", "token_seguimiento", "fecha_creacion",
+                  "fecha_entrega", "detalles", "historial"]
         read_only_fields = fields
+
+    def get_siguiente_estado(self, obj):
+        return services.siguiente_estado(obj.estado)
 
 
 class ItemPedidoSerializer(serializers.Serializer):
@@ -180,3 +185,50 @@ class PedidoActualizarSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         return PedidoSerializer(instance, context=self.context).data
+
+
+# ---------------------------------------------------------------------------
+# Sprint 2: estados, asignación y dashboard
+# ---------------------------------------------------------------------------
+
+class CambioEstadoSerializer(serializers.Serializer):
+    """Estado destino. Tiene que ser el inmediatamente siguiente al actual."""
+    estado = serializers.ChoiceField(choices=EstadoPedido.choices)
+
+
+class AsignacionSerializer(serializers.Serializer):
+    repartidor = serializers.PrimaryKeyRelatedField(queryset=Repartidor.objects.all())
+
+
+class PedidoResumenSerializer(serializers.ModelSerializer):
+    """Versión liviana del pedido para el tablero."""
+    cliente_nombre = serializers.CharField(source="cliente.nombre", read_only=True)
+    zona_nombre = serializers.CharField(source="zona.nombre", read_only=True)
+    repartidor_nombre = serializers.CharField(source="repartidor.nombre", read_only=True, default=None)
+    estado_display = serializers.CharField(source="get_estado_display", read_only=True)
+    siguiente_estado = serializers.SerializerMethodField()
+    minutos_transcurridos = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Pedido
+        fields = ["id", "cliente_nombre", "zona", "zona_nombre", "direccion_entrega",
+                  "repartidor", "repartidor_nombre", "estado", "estado_display",
+                  "siguiente_estado", "total", "tiempo_estimado_min",
+                  "minutos_transcurridos", "fecha_creacion"]
+
+    def get_siguiente_estado(self, obj):
+        return services.siguiente_estado(obj.estado)
+
+    def get_minutos_transcurridos(self, obj):
+        return services.minutos_transcurridos(obj, self.context.get("ahora"))
+
+
+class RepartidorCargaSerializer(serializers.ModelSerializer):
+    """Repartidor con su carga actual. Requiere el queryset anotado con `pedidos_activos`."""
+    estado_display = serializers.CharField(source="get_estado_display", read_only=True)
+    pedidos_activos = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Repartidor
+        fields = ["id", "nombre", "vehiculo", "estado", "estado_display",
+                  "pedidos_activos", "capacidad_max"]

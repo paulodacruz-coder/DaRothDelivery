@@ -24,6 +24,7 @@ urlpatterns = [
     path("api/auth/login/", views.LoginView.as_view(), name="login"),
     path("api/auth/logout/", views.LogoutView.as_view(), name="logout"),
     path("api/auth/yo/", views.UsuarioActualView.as_view(), name="usuario-actual"),
+    path("api/dashboard/", views.DashboardView.as_view(), name="dashboard"),
     path("api/", include(router.urls)),
     path("api-auth/", include("rest_framework.urls")),
 ]

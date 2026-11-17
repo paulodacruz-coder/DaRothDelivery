@@ -65,7 +65,16 @@ que se obtiene en el login.
 | GET | `/api/auth/yo/` | Usuario autenticado |
 | CRUD | `/api/zonas/`, `/api/productos/`, `/api/repartidores/` | Catálogo (solo el administrador modifica) |
 | CRUD | `/api/clientes/` | Clientes (`?q=` busca por nombre o teléfono) |
-| CRUD | `/api/pedidos/` | Pedidos (`?estado=`, `?zona=`, `?repartidor=`) |
+| CRUD | `/api/pedidos/` | Pedidos (`?estado=`, `?zona=`, `?repartidor=`, `?activos=1`) |
+| POST | `/api/pedidos/{id}/estado/` | Avanza al estado siguiente: `{"estado": "PREPARANDO"}` |
+| GET | `/api/pedidos/{id}/historial/` | Historial de estados del pedido |
+| POST | `/api/pedidos/{id}/asignar/` | Asignación manual: `{"repartidor": 3}` |
+| POST | `/api/pedidos/{id}/desasignar/` | Quita el repartidor |
+| GET | `/api/dashboard/` | Pedidos activos, carga de repartidores y números del día |
+
+Los estados avanzan en orden (Pendiente → Preparando → Listo → En camino → Entregado),
+sin saltear ni retroceder, y no se despacha un pedido sin repartidor. Una operación que no
+corresponde al estado actual responde **409 Conflict**.
 
 Alta de un pedido: el total, la zona, el tiempo estimado y el token de seguimiento los calcula el sistema.
 
@@ -111,7 +120,7 @@ El desarrollo está organizado en cinco sprints de una semana:
 | Sprint | Alcance | Estado |
 | --- | --- | --- |
 | 1 | Base del sistema y persistencia | Terminado |
-| 2 | Estados del pedido y asignación de repartidores | Pendiente |
+| 2 | Estados del pedido y asignación de repartidores | Terminado |
 | 3 | Seguimiento del pedido para el cliente | Pendiente |
 | 4 | Asignación inteligente y optimización | Pendiente |
 | 5 | Estadísticas y reportes | Pendiente |

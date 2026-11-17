@@ -19,7 +19,7 @@ from daroth_app.models import (
     Alerta, Cliente, DetallePedido, EstadoPedido, HistorialEstado, Pedido,
     Perfil, Producto, Repartidor, Zona,
 )
-from daroth_app.services import crear_pedido
+from daroth_app.services import ESTADOS_DEL_REPARTIDOR, ORDEN_ESTADOS, crear_pedido
 
 CONTRASENA = "daroth123"
 TOLERANCIA_ALERTA_MIN = 10
@@ -154,9 +154,6 @@ PEDIDOS = [
      PEN, 1, [], None),
 ]
 
-ORDEN_ESTADOS = [PEN, PRE, LIS, CAM, ENT]
-# EN_CAMINO y ENTREGADO los registra el repartidor desde su app: sin usuario del sistema.
-ESTADOS_DEL_REPARTIDOR = {CAM, ENT}
 
 
 def fijar_fecha(modelo, pk, **campos):

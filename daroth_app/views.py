@@ -1,18 +1,24 @@
+from decimal import Decimal
+
 from django.contrib.auth import authenticate
-from django.db.models import ProtectedError, Q
+from django.db.models import Count, ProtectedError, Q, Sum
+from django.utils import timezone
 from rest_framework import mixins, status, viewsets
 from rest_framework.authtoken.models import Token
+from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from . import services
 from .excepciones import Conflicto
-from .models import Cliente, EstadoPedido, Pedido, Producto, Repartidor, Zona
+from .models import Alerta, Cliente, EstadoPedido, Pedido, Producto, Repartidor, Zona
 from .permissions import EsAdministradorOSoloLectura
 from .serializers import (
-    ClienteSerializer, LoginSerializer, PedidoActualizarSerializer, PedidoCrearSerializer,
-    PedidoSerializer, ProductoSerializer, RepartidorSerializer, UsuarioSerializer,
-    ZonaSerializer,
+    AsignacionSerializer, CambioEstadoSerializer, ClienteSerializer,
+    HistorialEstadoSerializer, LoginSerializer, PedidoActualizarSerializer,
+    PedidoCrearSerializer, PedidoResumenSerializer, PedidoSerializer, ProductoSerializer,
+    RepartidorCargaSerializer, RepartidorSerializer, UsuarioSerializer, ZonaSerializer,
 )
 
 
@@ -105,17 +111,18 @@ class ClienteViewSet(BorradoProtegidoMixin, viewsets.ModelViewSet):
 # Pedidos
 # ---------------------------------------------------------------------------
 
-# Una vez que el pedido salió del local ya no se puede modificar ni borrar.
-ESTADOS_EDITABLES = {EstadoPedido.PENDIENTE, EstadoPedido.PREPARANDO, EstadoPedido.LISTO}
-
-
 class PedidoViewSet(mixins.CreateModelMixin, mixins.ListModelMixin,
                     mixins.RetrieveModelMixin, mixins.UpdateModelMixin,
                     mixins.DestroyModelMixin, viewsets.GenericViewSet):
     """
     CRUD de pedidos.
-    Filtros: ?estado=PENDIENTE&zona=<id>&repartidor=<id>
-    El cambio de estado y la asignación de repartidor tienen sus propios endpoints (Sprint 2).
+    Filtros: ?estado=PENDIENTE&zona=<id>&repartidor=<id>&activos=1
+
+    Acciones:
+      POST /pedidos/{id}/estado/       {"estado": "PREPARANDO"}  avanza al estado siguiente
+      GET  /pedidos/{id}/historial/                              historial de estados
+      POST /pedidos/{id}/asignar/      {"repartidor": 3}         asignación manual
+      POST /pedidos/{id}/desasignar/                             quita el repartidor
     """
 
     def get_queryset(self):
@@ -130,26 +137,60 @@ class PedidoViewSet(mixins.CreateModelMixin, mixins.ListModelMixin,
             qs = qs.filter(zona_id=params["zona"])
         if params.get("repartidor"):
             qs = qs.filter(repartidor_id=params["repartidor"])
+        if params.get("activos") in ("1", "true", "True"):
+            qs = qs.exclude(estado=EstadoPedido.ENTREGADO)
         return qs
 
     def get_serializer_class(self):
-        if self.action == "create":
-            return PedidoCrearSerializer
-        if self.action in ("update", "partial_update"):
-            return PedidoActualizarSerializer
-        return PedidoSerializer
+        return {
+            "create": PedidoCrearSerializer,
+            "update": PedidoActualizarSerializer,
+            "partial_update": PedidoActualizarSerializer,
+            "estado": CambioEstadoSerializer,
+            "asignar": AsignacionSerializer,
+            "historial": HistorialEstadoSerializer,
+        }.get(self.action, PedidoSerializer)
+
+    def _responder_pedido(self, pedido, codigo=status.HTTP_200_OK):
+        """Devuelve el pedido completo, releído con el queryset optimizado."""
+        pedido = self.get_queryset().get(pk=pedido.pk)
+        return Response(PedidoSerializer(pedido, context=self.get_serializer_context()).data,
+                        status=codigo)
+
+    @action(detail=True, methods=["post"])
+    def estado(self, request, pk=None):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        pedido = services.cambiar_estado(self.get_object(), serializer.validated_data["estado"],
+                                         request.user)
+        return self._responder_pedido(pedido)
+
+    @action(detail=True, methods=["get"])
+    def historial(self, request, pk=None):
+        registros = self.get_object().historial.select_related("usuario").order_by("fecha_hora")
+        return Response(HistorialEstadoSerializer(registros, many=True).data)
+
+    @action(detail=True, methods=["post"])
+    def asignar(self, request, pk=None):
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        pedido = services.asignar_repartidor(self.get_object(),
+                                             serializer.validated_data["repartidor"])
+        return self._responder_pedido(pedido)
+
+    @action(detail=True, methods=["post"])
+    def desasignar(self, request, pk=None):
+        pedido = services.desasignar_repartidor(self.get_object())
+        return self._responder_pedido(pedido)
 
     def create(self, request, *args, **kwargs):
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         pedido = serializer.save()
-        # Se vuelve a leer con el queryset optimizado para devolver historial y detalles.
-        pedido = self.get_queryset().get(pk=pedido.pk)
-        return Response(PedidoSerializer(pedido, context=self.get_serializer_context()).data,
-                        status=status.HTTP_201_CREATED)
+        return self._responder_pedido(pedido, status.HTTP_201_CREATED)
 
     def perform_update(self, serializer):
-        if serializer.instance.estado not in ESTADOS_EDITABLES:
+        if serializer.instance.estado not in services.ESTADOS_EN_LOCAL:
             raise Conflicto("El pedido ya salió del local: no se puede modificar.")
         serializer.save()
 
@@ -157,3 +198,52 @@ class PedidoViewSet(mixins.CreateModelMixin, mixins.ListModelMixin,
         if instance.estado != EstadoPedido.PENDIENTE:
             raise Conflicto("Solo se pueden borrar pedidos pendientes.")
         instance.delete()
+
+
+# ---------------------------------------------------------------------------
+# Dashboard
+# ---------------------------------------------------------------------------
+
+class DashboardView(APIView):
+    """
+    GET → panorama del local en este momento: cuántos pedidos hay en cada estado,
+    la lista de pedidos activos (los más antiguos primero, que son los urgentes),
+    la carga de cada repartidor y los números del día.
+    """
+
+    def get(self, request):
+        ahora = timezone.now()
+        inicio_del_dia = timezone.localtime(ahora).replace(hour=0, minute=0, second=0,
+                                                           microsecond=0)
+
+        activos = (Pedido.objects.exclude(estado=EstadoPedido.ENTREGADO)
+                   .select_related("cliente", "zona", "repartidor")
+                   .order_by("fecha_creacion"))
+
+        # order_by() vacío: si no, el orden por fecha se suma al GROUP BY y parte los grupos.
+        conteo = dict(activos.order_by().values("estado").annotate(n=Count("id"))
+                      .values_list("estado", "n"))
+        por_estado = {estado: conteo.get(estado, 0) for estado in services.ORDEN_ESTADOS
+                      if estado != EstadoPedido.ENTREGADO}
+
+        entregados_hoy = Pedido.objects.filter(estado=EstadoPedido.ENTREGADO,
+                                               fecha_entrega__gte=inicio_del_dia)
+        repartidores = (Repartidor.objects.exclude(estado=Repartidor.Estado.INACTIVO)
+                        .annotate(pedidos_activos=Count(
+                            "pedidos", filter=~Q(pedidos__estado=EstadoPedido.ENTREGADO)))
+                        .order_by("nombre"))
+
+        contexto = {"ahora": ahora, "request": request}
+        return Response({
+            "generado": ahora,
+            "pedidos_por_estado": por_estado,
+            "total_activos": sum(por_estado.values()),
+            "sin_repartidor": activos.filter(repartidor__isnull=True).count(),
+            "alertas_pendientes": Alerta.objects.filter(resuelta=False).count(),
+            "hoy": {
+                "entregados": entregados_hoy.count(),
+                "facturacion": str(entregados_hoy.aggregate(t=Sum("total"))["t"] or Decimal("0")),
+            },
+            "pedidos_activos": PedidoResumenSerializer(activos, many=True, context=contexto).data,
+            "repartidores": RepartidorCargaSerializer(repartidores, many=True).data,
+        })
