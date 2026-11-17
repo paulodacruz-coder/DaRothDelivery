@@ -19,10 +19,12 @@ from daroth_app.models import (
     Alerta, Cliente, DetallePedido, EstadoPedido, HistorialEstado, Pedido,
     Perfil, Producto, Repartidor, Zona,
 )
-from daroth_app.services import ESTADOS_DEL_REPARTIDOR, ORDEN_ESTADOS, crear_pedido
+from daroth_app.services import (
+    ESTADOS_DEL_REPARTIDOR, ORDEN_ESTADOS, TIPO_DEMORA, crear_pedido, limite_de_demora,
+    mensaje_de_demora,
+)
 
 CONTRASENA = "daroth123"
-TOLERANCIA_ALERTA_MIN = 10
 
 # (nombre, latitud, longitud, tiempo de viaje en minutos)
 ZONAS = [
@@ -267,14 +269,13 @@ class Command(BaseCommand):
             self.cargar_alerta_si_corresponde(pedido, estado_final, fecha_creacion, momento, ahora)
 
     def cargar_alerta_si_corresponde(self, pedido, estado_final, fecha_creacion, fin, ahora):
-        """Misma regla que el Sprint 5: tiempo estimado + 10 min de tolerancia."""
-        limite = fecha_creacion + timedelta(minutes=pedido.tiempo_estimado_min + TOLERANCIA_ALERTA_MIN)
+        """Misma regla que services.revisar_demoras, pero con las fechas históricas."""
+        pedido.fecha_creacion = fecha_creacion
+        limite = limite_de_demora(pedido)
         entregado = estado_final == ENT
         referencia = fin if entregado else ahora
         if referencia <= limite:
             return
-        alerta = Alerta.objects.create(
-            pedido=pedido, tipo="DEMORA", resuelta=entregado,
-            mensaje=(f"El pedido superó el tiempo estimado ({pedido.tiempo_estimado_min} min) "
-                     f"en más de {TOLERANCIA_ALERTA_MIN} minutos."))
+        alerta = Alerta.objects.create(pedido=pedido, tipo=TIPO_DEMORA, resuelta=entregado,
+                                       mensaje=mensaje_de_demora(pedido))
         fijar_fecha(Alerta, alerta.pk, fecha_hora=limite)

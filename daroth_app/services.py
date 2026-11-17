@@ -7,14 +7,16 @@ sin pasar por HTTP. Cuando una regla no se cumple se lanza ReglaDeNegocioError,
 que la API traduce a HTTP 409.
 """
 import math
-from datetime import timedelta
+from datetime import datetime, time, timedelta
 from decimal import Decimal
 
 from django.db import transaction
 from django.utils import timezone
 
 from .asignacion import ESTRATEGIA_POR_DEFECTO
-from .models import DetallePedido, EstadoPedido, HistorialEstado, Pedido, Repartidor
+from .models import (
+    Alerta, DetallePedido, EstadoPedido, HistorialEstado, Pedido, Repartidor, VistaTiemposPedido,
+)
 
 
 class ReglaDeNegocioError(Exception):
@@ -134,6 +136,9 @@ def cambiar_estado(pedido, nuevo_estado, usuario):
         usuario=None if nuevo_estado in ESTADOS_DEL_REPARTIDOR else usuario)
 
     _actualizar_estado_repartidor(pedido, nuevo_estado)
+    if nuevo_estado == EstadoPedido.ENTREGADO:
+        # Las alertas de demora se resuelven solas al entregar.
+        pedido.alertas.filter(resuelta=False).update(resuelta=True)
     return pedido
 
 
@@ -267,6 +272,47 @@ def cambiar_disponibilidad(repartidor, nuevo_estado):
 
 
 # ---------------------------------------------------------------------------
+# Alertas de demora
+# ---------------------------------------------------------------------------
+
+TOLERANCIA_DEMORA_MIN = 10
+TIPO_DEMORA = "DEMORA"
+
+
+def limite_de_demora(pedido):
+    """Momento a partir del cual el pedido se considera demorado."""
+    return pedido.fecha_creacion + timedelta(
+        minutes=pedido.tiempo_estimado_min + TOLERANCIA_DEMORA_MIN)
+
+
+def mensaje_de_demora(pedido):
+    return (f"El pedido superó el tiempo estimado ({pedido.tiempo_estimado_min} min) "
+            f"en más de {TOLERANCIA_DEMORA_MIN} minutos.")
+
+
+@transaction.atomic
+def revisar_demoras(ahora=None):
+    """
+    Genera una alerta DEMORA por cada pedido activo que superó su tiempo estimado
+    más la tolerancia, salvo que ya tenga una alerta pendiente. Devuelve las creadas.
+
+    No hay un proceso en segundo plano: se llama al consultar las alertas y el
+    dashboard, y también desde el comando `revisar_demoras` (para programarlo).
+    """
+    ahora = ahora or timezone.now()
+    # La tolerancia mínima posible acota la consulta; el límite exacto se mira por pedido.
+    candidatos = (Pedido.objects.select_for_update()
+                  .exclude(estado=EstadoPedido.ENTREGADO)
+                  .filter(fecha_creacion__lt=ahora - timedelta(minutes=TOLERANCIA_DEMORA_MIN))
+                  .exclude(pk__in=Alerta.objects.filter(resuelta=False, tipo=TIPO_DEMORA)
+                           .values("pedido_id")))
+    nuevas = [Alerta(pedido=p, tipo=TIPO_DEMORA, mensaje=mensaje_de_demora(p))
+              for p in candidatos if ahora > limite_de_demora(p)]
+    # bulk_create no usa save(), pero Alerta no tiene lógica propia: alcanza.
+    return Alerta.objects.bulk_create(nuevas)
+
+
+# ---------------------------------------------------------------------------
 # Dashboard
 # ---------------------------------------------------------------------------
 
@@ -322,3 +368,69 @@ def minutos_restantes(pedido, ahora=None):
         return None
     segundos = (estimada - ahora).total_seconds()
     return max(0, math.ceil(segundos / 60))
+
+
+# ---------------------------------------------------------------------------
+# Estadísticas (sobre la vista v_tiempos_pedido)
+# ---------------------------------------------------------------------------
+
+DIAS_POR_DEFECTO = 30
+
+
+def _promedio(valores):
+    valores = [v for v in valores if v is not None]
+    return round(sum(valores) / len(valores), 1) if valores else None
+
+
+def calcular_estadisticas(desde=None, hasta=None):
+    """
+    Resumen de los pedidos tomados entre `desde` y `hasta` (fechas locales, inclusive).
+    Por defecto, los últimos 30 días.
+
+    Los tiempos promedio y el porcentaje a tiempo se calculan sobre los entregados.
+    Se agrupa por día en Python: la base de XAMPP no trae las tablas de zonas
+    horarias, así que agrupar por fecha local en SQL daría NULL.
+    """
+    hoy = timezone.localdate()
+    hasta = hasta or hoy
+    desde = desde or hasta - timedelta(days=DIAS_POR_DEFECTO - 1)
+    zona_horaria = timezone.get_current_timezone()
+    inicio = datetime.combine(desde, time.min, tzinfo=zona_horaria)
+    fin = datetime.combine(hasta + timedelta(days=1), time.min, tzinfo=zona_horaria)
+
+    filas = list(VistaTiemposPedido.objects.filter(fecha_creacion__gte=inicio,
+                                                   fecha_creacion__lt=fin))
+    entregados = [f for f in filas if f.estado == EstadoPedido.ENTREGADO]
+    facturacion = sum((f.total for f in entregados), Decimal("0"))
+
+    por_dia = {}
+    for fila in filas:
+        dia = por_dia.setdefault(timezone.localtime(fila.fecha_creacion).date(),
+                                 {"pedidos": 0, "entregados": 0, "facturacion": Decimal("0")})
+        dia["pedidos"] += 1
+        if fila.estado == EstadoPedido.ENTREGADO:
+            dia["entregados"] += 1
+            dia["facturacion"] += fila.total
+
+    a_tiempo = [f.a_tiempo for f in entregados if f.a_tiempo is not None]
+    return {
+        "desde": desde,
+        "hasta": hasta,
+        "pedidos": len(filas),
+        "entregados": len(entregados),
+        "facturacion": facturacion,
+        "ticket_promedio": (facturacion / len(entregados)).quantize(Decimal("0.01"))
+                           if entregados else None,
+        "pct_a_tiempo": round(100 * sum(a_tiempo) / len(a_tiempo), 1) if a_tiempo else None,
+        "alertas_de_demora": Alerta.objects.filter(
+            tipo=TIPO_DEMORA, pedido__fecha_creacion__gte=inicio,
+            pedido__fecha_creacion__lt=fin).count(),
+        "minutos_promedio": {
+            "espera": _promedio(f.min_espera for f in entregados),
+            "preparacion": _promedio(f.min_preparacion for f in entregados),
+            "despacho": _promedio(f.min_despacho for f in entregados),
+            "viaje": _promedio(f.min_viaje for f in entregados),
+            "total": _promedio(f.min_total for f in entregados),
+        },
+        "por_dia": [{"fecha": fecha, **datos} for fecha, datos in sorted(por_dia.items())],
+    }

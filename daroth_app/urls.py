@@ -21,6 +21,18 @@ router.register("productos", views.ProductoViewSet, basename="producto")
 router.register("repartidores", views.RepartidorViewSet, basename="repartidor")
 router.register("clientes", views.ClienteViewSet, basename="cliente")
 router.register("pedidos", views.PedidoViewSet, basename="pedido")
+router.register("alertas", views.AlertaViewSet, basename="alerta")
+# Reportes: una ruta por cada vista SQL (Sprint 5).
+router.register("reportes/pedidos-activos", views.ReportePedidosActivosViewSet,
+                basename="reporte-pedidos-activos")
+router.register("reportes/tiempos-pedido", views.ReporteTiemposPedidoViewSet,
+                basename="reporte-tiempos-pedido")
+router.register("reportes/rendimiento-repartidores", views.ReporteRendimientoRepartidoresViewSet,
+                basename="reporte-rendimiento-repartidores")
+router.register("reportes/demanda-zona", views.ReporteDemandaZonaViewSet,
+                basename="reporte-demanda-zona")
+router.register("reportes/productos-mas-vendidos", views.ReporteProductosMasVendidosViewSet,
+                basename="reporte-productos-mas-vendidos")
 
 urlpatterns = [
     path("admin/", admin.site.urls),
@@ -28,6 +40,7 @@ urlpatterns = [
     path("api/auth/logout/", views.LogoutView.as_view(), name="logout"),
     path("api/auth/yo/", views.UsuarioActualView.as_view(), name="usuario-actual"),
     path("api/dashboard/", views.DashboardView.as_view(), name="dashboard"),
+    path("api/estadisticas/", views.EstadisticasView.as_view(), name="estadisticas"),
     path("api/seguimiento/<str:token>/", views.SeguimientoView.as_view(), name="seguimiento"),
     path("api/", include(router.urls)),
     path("api-auth/", include("rest_framework.urls")),

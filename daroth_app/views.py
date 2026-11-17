@@ -10,6 +10,7 @@ from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
+from rest_framework.settings import api_settings
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
@@ -18,11 +19,13 @@ from .excepciones import Conflicto
 from .models import Alerta, Cliente, EstadoPedido, Pedido, Producto, Repartidor, Zona
 from .permissions import EsAdministradorOSoloLectura
 from .serializers import (
-    AsignacionSerializer, CambioEstadoSerializer, ClienteSerializer, DisponibilidadSerializer,
-    HistorialEstadoSerializer, LoginSerializer, PedidoActualizarSerializer,
-    PedidoCrearSerializer, PedidoResumenSerializer, PedidoSerializer, ProductoSerializer,
-    RepartidorCargaSerializer, RepartidorSerializer, SeguimientoSerializer,
-    SugerenciaSerializer, UbicacionSerializer, UsuarioSerializer, ZonaSerializer,
+    AlertaSerializer, AsignacionSerializer, CambioEstadoSerializer, ClienteSerializer,
+    DisponibilidadSerializer, EstadisticasSerializer, HistorialEstadoSerializer, LoginSerializer,
+    PedidoActualizarSerializer, PedidoCrearSerializer, PedidoResumenSerializer, PedidoSerializer,
+    PeriodoSerializer, ProductoSerializer, RepartidorCargaSerializer, RepartidorSerializer,
+    SeguimientoSerializer, SugerenciaSerializer, UbicacionSerializer, UsuarioSerializer,
+    VistaDemandaZonaSerializer, VistaPedidoActivoSerializer, VistaProductoVendidoSerializer,
+    VistaRendimientoRepartidorSerializer, VistaTiemposPedidoSerializer, ZonaSerializer,
 )
 
 # Respuesta de error de negocio (ver excepciones.py), para la documentación.
@@ -294,6 +297,7 @@ class DashboardView(APIView):
         "repartidores": RepartidorCargaSerializer(many=True),
     }))
     def get(self, request):
+        services.revisar_demoras()
         ahora = timezone.now()
         inicio_del_dia = timezone.localtime(ahora).replace(hour=0, minute=0, second=0,
                                                            microsecond=0)
@@ -360,3 +364,101 @@ class SeguimientoView(APIView):
             token_seguimiento=token)
         contexto = {"ahora": timezone.now(), "request": request}
         return Response(SeguimientoSerializer(pedido, context=contexto).data)
+
+
+# ---------------------------------------------------------------------------
+# Alertas de demora
+# ---------------------------------------------------------------------------
+
+class AlertaViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Alertas de demora, las más recientes primero. Filtros: ?resuelta=0|1&pedido=<id>
+
+    Antes de listar se revisan las demoras, así que un pedido que acaba de pasarse
+    del tiempo estimado + 10 minutos ya aparece. Se resuelven solas al entregar.
+    """
+    serializer_class = AlertaSerializer
+
+    def get_queryset(self):
+        qs = (Alerta.objects.select_related("pedido__cliente", "pedido__zona",
+                                            "pedido__repartidor")
+              .order_by("-fecha_hora", "-id"))
+        params = self.request.query_params
+        if params.get("resuelta") in ("0", "false", "False"):
+            qs = qs.filter(resuelta=False)
+        elif params.get("resuelta") in ("1", "true", "True"):
+            qs = qs.filter(resuelta=True)
+        if params.get("pedido"):
+            qs = qs.filter(pedido_id=params["pedido"])
+        return qs
+
+    def get_serializer_context(self):
+        return {**super().get_serializer_context(), "ahora": timezone.now()}
+
+    def list(self, request, *args, **kwargs):
+        services.revisar_demoras()
+        return super().list(request, *args, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# Reportes: lectura de las 5 vistas SQL
+# ---------------------------------------------------------------------------
+
+class ReporteViewSet(mixins.ListModelMixin, viewsets.GenericViewSet):
+    """Base de los reportes: solo listado, sin paginar (salvo el de tiempos)."""
+    pagination_class = None
+    orden = ()
+
+    def get_queryset(self):
+        return self.serializer_class.Meta.model.objects.order_by(*self.orden)
+
+
+class ReportePedidosActivosViewSet(ReporteViewSet):
+    """v_pedidos_activos: los que más tiempo llevan primero."""
+    serializer_class = VistaPedidoActivoSerializer
+    orden = ("fecha_creacion",)
+
+
+class ReporteTiemposPedidoViewSet(ReporteViewSet):
+    """v_tiempos_pedido: minutos de cada etapa de cada pedido. Filtro: ?estado=ENTREGADO"""
+    serializer_class = VistaTiemposPedidoSerializer
+    pagination_class = api_settings.DEFAULT_PAGINATION_CLASS
+    orden = ("-fecha_creacion",)
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        estado = self.request.query_params.get("estado")
+        return qs.filter(estado=estado.upper()) if estado else qs
+
+
+class ReporteRendimientoRepartidoresViewSet(ReporteViewSet):
+    """v_rendimiento_repartidores: los que más entregaron primero."""
+    serializer_class = VistaRendimientoRepartidorSerializer
+    orden = ("-entregas", "prom_min_total", "nombre")
+
+
+class ReporteDemandaZonaViewSet(ReporteViewSet):
+    """v_demanda_zona: las zonas con más pedidos primero."""
+    serializer_class = VistaDemandaZonaSerializer
+    orden = ("-pedidos", "nombre")
+
+
+class ReporteProductosMasVendidosViewSet(ReporteViewSet):
+    """v_productos_mas_vendidos: por unidades vendidas."""
+    serializer_class = VistaProductoVendidoSerializer
+    orden = ("-unidades", "-facturacion", "nombre")
+
+
+class EstadisticasView(APIView):
+    """
+    GET → resumen de un período: pedidos, facturación, porcentaje entregado a tiempo,
+    tiempo promedio de cada etapa y evolución por día.
+    Filtros: ?desde=2026-11-01&hasta=2026-11-17 (por defecto, los últimos 30 días).
+    """
+
+    @extend_schema(parameters=[PeriodoSerializer], responses=EstadisticasSerializer)
+    def get(self, request):
+        periodo = PeriodoSerializer(data=request.query_params)
+        periodo.is_valid(raise_exception=True)
+        datos = services.calcular_estadisticas(**periodo.validated_data)
+        return Response(EstadisticasSerializer(datos).data)

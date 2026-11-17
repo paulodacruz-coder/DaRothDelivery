@@ -77,6 +77,13 @@ que se obtiene en el login. La única excepción es el seguimiento público.
 | POST | `/api/repartidores/{id}/disponibilidad/` | Turno: `{"estado": "DISPONIBLE"}` o `"INACTIVO"` |
 | GET | `/api/dashboard/` | Pedidos activos, carga de repartidores y números del día |
 | GET | `/api/seguimiento/{token}/` | **Público.** Estado, historial y minutos restantes del pedido |
+| GET | `/api/alertas/` | Alertas de demora (`?resuelta=0`, `?pedido=`) |
+| GET | `/api/estadisticas/` | Resumen del período (`?desde=2026-11-01&hasta=2026-11-17`, por defecto 30 días) |
+| GET | `/api/reportes/pedidos-activos/` | Vista `v_pedidos_activos` |
+| GET | `/api/reportes/tiempos-pedido/` | Vista `v_tiempos_pedido`: minutos de cada etapa (`?estado=`) |
+| GET | `/api/reportes/rendimiento-repartidores/` | Vista `v_rendimiento_repartidores` |
+| GET | `/api/reportes/demanda-zona/` | Vista `v_demanda_zona` |
+| GET | `/api/reportes/productos-mas-vendidos/` | Vista `v_productos_mas_vendidos` |
 
 Los estados avanzan en orden (Pendiente → Preparando → Listo → En camino → Entregado),
 sin saltear ni retroceder, y no se despacha un pedido sin repartidor. Una operación que no
@@ -85,6 +92,11 @@ corresponde al estado actual responde **409 Conflict**.
 La sugerencia de repartidor usa el patrón Strategy (`asignacion.py`). La estrategia actual
 puntúa `distancia_km a la zona + 2 × pedidos activos − 1,5 si ya va a esa zona` (menor es
 mejor) y solo considera repartidores disponibles, con lugar y con ubicación conocida.
+
+Un pedido que supera su tiempo estimado más 10 minutos de tolerancia genera una alerta de
+demora, que se resuelve sola al entregarlo. Las demoras se revisan al consultar las alertas
+y el dashboard; para que se generen aunque nadie mire, programar cada minuto
+`python manage.py revisar_demoras` (Programador de tareas de Windows o cron).
 
 Cada pedido trae un `enlace_seguimiento` para mandarle al cliente. Esa página no pide login,
 muestra solo el estado y el tiempo restante (ningún dato interno) y admite hasta 30
@@ -123,8 +135,10 @@ DaRothDelivery/
     ├── asignacion.py  Asignación inteligente (patrón Strategy)
     ├── serializers.py, views.py, permissions.py
     ├── admin.py
-    ├── migrations/
-    ├── management/commands/cargar_datos.py
+    ├── migrations/    Incluye 0003: las 5 vistas SQL de reportes
+    ├── management/commands/
+    │   ├── cargar_datos.py      Datos de prueba
+    │   └── revisar_demoras.py   Genera las alertas de demora
     └── tests/         Pruebas automáticas, un archivo por sprint
 ```
 
@@ -138,7 +152,7 @@ El desarrollo está organizado en cinco sprints de una semana:
 | 2 | Estados del pedido y asignación de repartidores | Terminado |
 | 3 | Seguimiento del pedido para el cliente | Terminado |
 | 4 | Asignación inteligente y optimización | Terminado |
-| 5 | Estadísticas y reportes | Pendiente |
+| 5 | Estadísticas y reportes | Terminado (backend; el frontend queda pendiente) |
 
 ## Documentación
 

@@ -6,7 +6,8 @@ from rest_framework import serializers
 from . import services
 from .models import (
     Alerta, Cliente, DetallePedido, EstadoPedido, HistorialEstado, Pedido, Producto,
-    Repartidor, Zona,
+    Repartidor, VistaDemandaZona, VistaPedidoActivo, VistaProductoVendido,
+    VistaRendimientoRepartidor, VistaTiemposPedido, Zona,
 )
 
 
@@ -143,9 +144,22 @@ class HistorialEstadoSerializer(serializers.ModelSerializer):
 
 
 class AlertaSerializer(serializers.ModelSerializer):
+    """Alerta con lo mínimo del pedido para poder actuar sin abrirlo."""
+    cliente_nombre = serializers.CharField(source="pedido.cliente.nombre", read_only=True)
+    zona_nombre = serializers.CharField(source="pedido.zona.nombre", read_only=True)
+    repartidor_nombre = serializers.CharField(source="pedido.repartidor.nombre", read_only=True,
+                                              default=None)
+    estado_pedido = serializers.CharField(source="pedido.estado", read_only=True)
+    minutos_transcurridos = serializers.SerializerMethodField()
+
     class Meta:
         model = Alerta
-        fields = ["id", "pedido", "tipo", "mensaje", "fecha_hora", "resuelta"]
+        fields = ["id", "pedido", "tipo", "mensaje", "fecha_hora", "resuelta",
+                  "estado_pedido", "cliente_nombre", "zona_nombre", "repartidor_nombre",
+                  "minutos_transcurridos"]
+
+    def get_minutos_transcurridos(self, obj) -> int:
+        return services.minutos_transcurridos(obj.pedido, self.context.get("ahora"))
 
 
 class PedidoSerializer(serializers.ModelSerializer):
@@ -383,3 +397,76 @@ class SeguimientoSerializer(serializers.ModelSerializer):
     def get_historial(self, obj):
         registros = sorted(obj.historial.all(), key=lambda h: (h.fecha_hora, h.pk))
         return HistorialPublicoSerializer(registros, many=True).data
+
+
+# ---------------------------------------------------------------------------
+# Sprint 5: reportes (vistas SQL) y estadísticas
+# ---------------------------------------------------------------------------
+
+class VistaPedidoActivoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VistaPedidoActivo
+        fields = "__all__"
+
+
+class VistaTiemposPedidoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VistaTiemposPedido
+        fields = "__all__"
+
+
+class VistaRendimientoRepartidorSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VistaRendimientoRepartidor
+        fields = "__all__"
+
+
+class VistaDemandaZonaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VistaDemandaZona
+        fields = "__all__"
+
+
+class VistaProductoVendidoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = VistaProductoVendido
+        fields = "__all__"
+
+
+class PeriodoSerializer(serializers.Serializer):
+    """Filtro de fechas de las estadísticas (fechas locales, ambas inclusive)."""
+    desde = serializers.DateField(required=False)
+    hasta = serializers.DateField(required=False)
+
+    def validate(self, datos):
+        if datos.get("desde") and datos.get("hasta") and datos["desde"] > datos["hasta"]:
+            raise serializers.ValidationError("«desde» no puede ser posterior a «hasta».")
+        return datos
+
+
+class TiemposPromedioSerializer(serializers.Serializer):
+    espera = serializers.FloatField(allow_null=True, help_text="Creación → Preparando")
+    preparacion = serializers.FloatField(allow_null=True, help_text="Preparando → Listo")
+    despacho = serializers.FloatField(allow_null=True, help_text="Listo → En camino")
+    viaje = serializers.FloatField(allow_null=True, help_text="En camino → Entregado")
+    total = serializers.FloatField(allow_null=True, help_text="Creación → Entregado")
+
+
+class EstadisticaDiaSerializer(serializers.Serializer):
+    fecha = serializers.DateField()
+    pedidos = serializers.IntegerField()
+    entregados = serializers.IntegerField()
+    facturacion = serializers.DecimalField(max_digits=14, decimal_places=2)
+
+
+class EstadisticasSerializer(serializers.Serializer):
+    desde = serializers.DateField()
+    hasta = serializers.DateField()
+    pedidos = serializers.IntegerField()
+    entregados = serializers.IntegerField()
+    facturacion = serializers.DecimalField(max_digits=14, decimal_places=2)
+    ticket_promedio = serializers.DecimalField(max_digits=12, decimal_places=2, allow_null=True)
+    pct_a_tiempo = serializers.FloatField(allow_null=True)
+    alertas_de_demora = serializers.IntegerField()
+    minutos_promedio = TiemposPromedioSerializer()
+    por_dia = EstadisticaDiaSerializer(many=True)
