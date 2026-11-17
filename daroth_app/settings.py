@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'rest_framework.authtoken',
+    'drf_spectacular',
     'daroth_app',
 ]
 
@@ -158,4 +159,31 @@ REST_FRAMEWORK = {
     'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
     'PAGE_SIZE': 25,
     'EXCEPTION_HANDLER': 'daroth_app.excepciones.manejar_excepciones',
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+    # Límite de consultas por IP del seguimiento público (ScopedRateThrottle).
+    'DEFAULT_THROTTLE_RATES': {
+        'seguimiento': '30/min',
+    },
+}
+
+
+# Documentación de la API (drf-spectacular): /docs/ (Swagger) y /api/schema/ (OpenAPI).
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'DaRoth Delivery API',
+    'DESCRIPTION': (
+        'API REST de gestión de pedidos y repartidores para restaurantes con delivery propio.\n\n'
+        'Autenticación: obtener el token en `POST /api/auth/login/` y enviarlo en el header '
+        '`Authorization: Token <token>` (en esta página: botón **Authorize**, escribiendo '
+        '`Token <token>`).\n\n'
+        'Las operaciones que no corresponden al estado actual del pedido responden **409 Conflict**. '
+        'El único endpoint público es `GET /api/seguimiento/{token}/`.'
+    ),
+    'VERSION': '0.3.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    'COMPONENT_SPLIT_REQUEST': True,
+    # Pedido y Repartidor tienen ambos un campo "estado": se les da nombre propio.
+    'ENUM_NAME_OVERRIDES': {
+        'EstadoPedidoEnum': 'daroth_app.models.EstadoPedido',
+        'EstadoRepartidorEnum': 'daroth_app.models.Repartidor.Estado',
+    },
 }

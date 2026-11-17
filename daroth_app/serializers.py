@@ -1,4 +1,6 @@
 from django.contrib.auth.models import User
+from django.urls import reverse
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from . import services
@@ -20,11 +22,11 @@ class UsuarioSerializer(serializers.ModelSerializer):
         model = User
         fields = ["id", "username", "nombre_completo", "email", "rol"]
 
-    def get_rol(self, obj):
+    def get_rol(self, obj) -> str | None:
         perfil = getattr(obj, "perfil", None)
         return perfil.rol if perfil else None
 
-    def get_nombre_completo(self, obj):
+    def get_nombre_completo(self, obj) -> str:
         return obj.get_full_name() or obj.username
 
 
@@ -98,6 +100,7 @@ class DetallePedidoSerializer(serializers.ModelSerializer):
         model = DetallePedido
         fields = ["producto", "producto_nombre", "cantidad", "precio_unitario", "subtotal"]
 
+    @extend_schema_field(serializers.DecimalField(max_digits=12, decimal_places=2))
     def get_subtotal(self, obj):
         return str(obj.precio_unitario * obj.cantidad)
 
@@ -125,6 +128,7 @@ class PedidoSerializer(serializers.ModelSerializer):
     usuario = serializers.CharField(source="usuario.username", read_only=True)
     estado_display = serializers.CharField(source="get_estado_display", read_only=True)
     siguiente_estado = serializers.SerializerMethodField()
+    enlace_seguimiento = serializers.SerializerMethodField()
     detalles = DetallePedidoSerializer(many=True, read_only=True)
     historial = HistorialEstadoSerializer(many=True, read_only=True)
 
@@ -133,12 +137,18 @@ class PedidoSerializer(serializers.ModelSerializer):
         fields = ["id", "cliente", "cliente_nombre", "zona", "zona_nombre",
                   "repartidor", "repartidor_nombre", "usuario", "direccion_entrega",
                   "estado", "estado_display", "siguiente_estado", "total",
-                  "tiempo_estimado_min", "token_seguimiento", "fecha_creacion",
-                  "fecha_entrega", "detalles", "historial"]
+                  "tiempo_estimado_min", "token_seguimiento", "enlace_seguimiento",
+                  "fecha_creacion", "fecha_entrega", "detalles", "historial"]
         read_only_fields = fields
 
-    def get_siguiente_estado(self, obj):
+    def get_siguiente_estado(self, obj) -> str | None:
         return services.siguiente_estado(obj.estado)
+
+    def get_enlace_seguimiento(self, obj) -> str:
+        """URL pública que el local le pasa al cliente (por WhatsApp, SMS, etc.)."""
+        ruta = reverse("seguimiento", kwargs={"token": obj.token_seguimiento})
+        request = self.context.get("request")
+        return request.build_absolute_uri(ruta) if request else ruta
 
 
 class ItemPedidoSerializer(serializers.Serializer):
@@ -208,19 +218,23 @@ class PedidoResumenSerializer(serializers.ModelSerializer):
     estado_display = serializers.CharField(source="get_estado_display", read_only=True)
     siguiente_estado = serializers.SerializerMethodField()
     minutos_transcurridos = serializers.SerializerMethodField()
+    minutos_restantes = serializers.SerializerMethodField()
 
     class Meta:
         model = Pedido
         fields = ["id", "cliente_nombre", "zona", "zona_nombre", "direccion_entrega",
                   "repartidor", "repartidor_nombre", "estado", "estado_display",
                   "siguiente_estado", "total", "tiempo_estimado_min",
-                  "minutos_transcurridos", "fecha_creacion"]
+                  "minutos_transcurridos", "minutos_restantes", "fecha_creacion"]
 
-    def get_siguiente_estado(self, obj):
+    def get_siguiente_estado(self, obj) -> str | None:
         return services.siguiente_estado(obj.estado)
 
-    def get_minutos_transcurridos(self, obj):
+    def get_minutos_transcurridos(self, obj) -> int:
         return services.minutos_transcurridos(obj, self.context.get("ahora"))
+
+    def get_minutos_restantes(self, obj) -> int | None:
+        return services.minutos_restantes(obj, self.context.get("ahora"))
 
 
 class RepartidorCargaSerializer(serializers.ModelSerializer):
@@ -232,3 +246,46 @@ class RepartidorCargaSerializer(serializers.ModelSerializer):
         model = Repartidor
         fields = ["id", "nombre", "vehiculo", "estado", "estado_display",
                   "pedidos_activos", "capacidad_max"]
+
+
+# ---------------------------------------------------------------------------
+# Sprint 3: seguimiento público
+# ---------------------------------------------------------------------------
+# Lo ve cualquiera que tenga el enlace, así que es deliberadamente reducido:
+# nada de ids, nombres, teléfonos, direcciones, montos ni usuarios del local.
+
+class HistorialPublicoSerializer(serializers.ModelSerializer):
+    estado_display = serializers.CharField(source="get_estado_display", read_only=True)
+
+    class Meta:
+        model = HistorialEstado
+        fields = ["estado", "estado_display", "fecha_hora"]
+
+
+class SeguimientoSerializer(serializers.ModelSerializer):
+    estado_display = serializers.CharField(source="get_estado_display", read_only=True)
+    entregado = serializers.SerializerMethodField()
+    hora_estimada_entrega = serializers.SerializerMethodField()
+    minutos_restantes = serializers.SerializerMethodField()
+    historial = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Pedido
+        fields = ["estado", "estado_display", "entregado", "fecha_creacion",
+                  "hora_estimada_entrega", "minutos_restantes", "fecha_entrega", "historial"]
+
+    def get_entregado(self, obj) -> bool:
+        return obj.estado == EstadoPedido.ENTREGADO
+
+    @extend_schema_field(serializers.DateTimeField(allow_null=True))
+    def get_hora_estimada_entrega(self, obj):
+        estimada = services.estimar_entrega(obj, self.context.get("ahora"))
+        return serializers.DateTimeField().to_representation(estimada) if estimada else None
+
+    def get_minutos_restantes(self, obj) -> int | None:
+        return services.minutos_restantes(obj, self.context.get("ahora"))
+
+    @extend_schema_field(HistorialPublicoSerializer(many=True))
+    def get_historial(self, obj):
+        registros = sorted(obj.historial.all(), key=lambda h: (h.fecha_hora, h.pk))
+        return HistorialPublicoSerializer(registros, many=True).data

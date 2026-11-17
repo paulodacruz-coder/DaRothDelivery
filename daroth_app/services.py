@@ -6,6 +6,8 @@ se puedan reutilizar (por ejemplo, desde el comando cargar_datos) y probar
 sin pasar por HTTP. Cuando una regla no se cumple se lanza ReglaDeNegocioError,
 que la API traduce a HTTP 409.
 """
+import math
+from datetime import timedelta
 from decimal import Decimal
 
 from django.db import transaction
@@ -202,3 +204,51 @@ def minutos_transcurridos(pedido, ahora=None):
     """Minutos desde la creación hasta la entrega (o hasta ahora, si sigue activo)."""
     fin = pedido.fecha_entrega or ahora or timezone.now()
     return int((fin - pedido.fecha_creacion).total_seconds() // 60)
+
+
+# ---------------------------------------------------------------------------
+# Seguimiento: hora estimada de entrega
+# ---------------------------------------------------------------------------
+
+def fecha_de_estado(pedido, estado):
+    """Fecha en que el pedido llegó a `estado`, según el historial (None si no llegó)."""
+    # Se recorre en Python para aprovechar el historial si ya vino con prefetch_related.
+    fechas = [h.fecha_hora for h in pedido.historial.all() if h.estado == estado]
+    return min(fechas) if fechas else None
+
+
+def estimar_entrega(pedido, ahora=None):
+    """
+    Hora estimada de entrega, recalculada según en qué etapa está el pedido.
+    Devuelve None si el pedido ya se entregó.
+
+    - Estimación base: fecha de creación + tiempo_estimado_min (lo que se le
+      prometió al cliente al tomar el pedido).
+    - Mientras está en el local: si la cocina se atrasó, el pedido igual tiene
+      que viajar, así que nunca se estima antes de ahora + el viaje a la zona.
+    - En camino: la mejor información es la hora de salida + el viaje a la zona.
+    """
+    if pedido.estado == EstadoPedido.ENTREGADO:
+        return None
+    ahora = ahora or timezone.now()
+    viaje = timedelta(minutes=pedido.zona.tiempo_viaje_min)
+
+    if pedido.estado == EstadoPedido.EN_CAMINO:
+        salida = fecha_de_estado(pedido, EstadoPedido.EN_CAMINO) or ahora
+        return salida + viaje
+
+    base = pedido.fecha_creacion + timedelta(minutes=pedido.tiempo_estimado_min)
+    return max(base, ahora + viaje)
+
+
+def minutos_restantes(pedido, ahora=None):
+    """
+    Minutos que faltan para la entrega estimada, redondeados hacia arriba.
+    0 si ya se cumplió la hora estimada; None si el pedido ya se entregó.
+    """
+    ahora = ahora or timezone.now()
+    estimada = estimar_entrega(pedido, ahora)
+    if estimada is None:
+        return None
+    segundos = (estimada - ahora).total_seconds()
+    return max(0, math.ceil(segundos / 60))

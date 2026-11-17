@@ -3,11 +3,14 @@ from decimal import Decimal
 from django.contrib.auth import authenticate
 from django.db.models import Count, ProtectedError, Q, Sum
 from django.utils import timezone
-from rest_framework import mixins, status, viewsets
+from drf_spectacular.utils import extend_schema, inline_serializer
+from rest_framework import mixins, serializers, status, viewsets
 from rest_framework.authtoken.models import Token
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny
+from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
+from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from . import services
@@ -18,8 +21,12 @@ from .serializers import (
     AsignacionSerializer, CambioEstadoSerializer, ClienteSerializer,
     HistorialEstadoSerializer, LoginSerializer, PedidoActualizarSerializer,
     PedidoCrearSerializer, PedidoResumenSerializer, PedidoSerializer, ProductoSerializer,
-    RepartidorCargaSerializer, RepartidorSerializer, UsuarioSerializer, ZonaSerializer,
+    RepartidorCargaSerializer, RepartidorSerializer, SeguimientoSerializer, UsuarioSerializer,
+    ZonaSerializer,
 )
+
+# Respuesta de error de negocio (ver excepciones.py), para la documentación.
+RESPUESTA_409 = inline_serializer("Conflicto", {"detail": serializers.CharField()})
 
 
 # ---------------------------------------------------------------------------
@@ -45,6 +52,7 @@ class LoginView(APIView):
 class LogoutView(APIView):
     """POST → invalida el token del usuario actual."""
 
+    @extend_schema(request=None, responses={204: None})
     def post(self, request):
         Token.objects.filter(user=request.user).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -52,6 +60,7 @@ class LogoutView(APIView):
 
 class UsuarioActualView(APIView):
     """GET → datos y rol del usuario autenticado."""
+    serializer_class = UsuarioSerializer
 
     def get(self, request):
         return Response(UsuarioSerializer(request.user).data)
@@ -157,6 +166,7 @@ class PedidoViewSet(mixins.CreateModelMixin, mixins.ListModelMixin,
         return Response(PedidoSerializer(pedido, context=self.get_serializer_context()).data,
                         status=codigo)
 
+    @extend_schema(responses={200: PedidoSerializer, 409: RESPUESTA_409})
     @action(detail=True, methods=["post"])
     def estado(self, request, pk=None):
         serializer = self.get_serializer(data=request.data)
@@ -165,11 +175,13 @@ class PedidoViewSet(mixins.CreateModelMixin, mixins.ListModelMixin,
                                          request.user)
         return self._responder_pedido(pedido)
 
-    @action(detail=True, methods=["get"])
+    @extend_schema(responses=HistorialEstadoSerializer(many=True))
+    @action(detail=True, methods=["get"], pagination_class=None)
     def historial(self, request, pk=None):
         registros = self.get_object().historial.select_related("usuario").order_by("fecha_hora")
         return Response(HistorialEstadoSerializer(registros, many=True).data)
 
+    @extend_schema(responses={200: PedidoSerializer, 409: RESPUESTA_409})
     @action(detail=True, methods=["post"])
     def asignar(self, request, pk=None):
         serializer = self.get_serializer(data=request.data)
@@ -178,6 +190,7 @@ class PedidoViewSet(mixins.CreateModelMixin, mixins.ListModelMixin,
                                              serializer.validated_data["repartidor"])
         return self._responder_pedido(pedido)
 
+    @extend_schema(request=None, responses={200: PedidoSerializer, 409: RESPUESTA_409})
     @action(detail=True, methods=["post"])
     def desasignar(self, request, pk=None):
         pedido = services.desasignar_repartidor(self.get_object())
@@ -211,6 +224,19 @@ class DashboardView(APIView):
     la carga de cada repartidor y los números del día.
     """
 
+    @extend_schema(responses=inline_serializer("Dashboard", {
+        "generado": serializers.DateTimeField(),
+        "pedidos_por_estado": serializers.DictField(child=serializers.IntegerField()),
+        "total_activos": serializers.IntegerField(),
+        "sin_repartidor": serializers.IntegerField(),
+        "alertas_pendientes": serializers.IntegerField(),
+        "hoy": inline_serializer("DashboardHoy", {
+            "entregados": serializers.IntegerField(),
+            "facturacion": serializers.DecimalField(max_digits=12, decimal_places=2),
+        }),
+        "pedidos_activos": PedidoResumenSerializer(many=True),
+        "repartidores": RepartidorCargaSerializer(many=True),
+    }))
     def get(self, request):
         ahora = timezone.now()
         inicio_del_dia = timezone.localtime(ahora).replace(hour=0, minute=0, second=0,
@@ -233,6 +259,7 @@ class DashboardView(APIView):
                             "pedidos", filter=~Q(pedidos__estado=EstadoPedido.ENTREGADO)))
                         .order_by("nombre"))
 
+        activos = activos.prefetch_related("historial")
         contexto = {"ahora": ahora, "request": request}
         return Response({
             "generado": ahora,
@@ -247,3 +274,33 @@ class DashboardView(APIView):
             "pedidos_activos": PedidoResumenSerializer(activos, many=True, context=contexto).data,
             "repartidores": RepartidorCargaSerializer(repartidores, many=True).data,
         })
+
+
+# ---------------------------------------------------------------------------
+# Seguimiento público
+# ---------------------------------------------------------------------------
+
+class SeguimientoView(APIView):
+    """
+    GET /api/seguimiento/{token}/ → estado del pedido para el cliente final.
+
+    Es el único endpoint público: no pide login, porque el cliente no tiene cuenta.
+    El token de 32 caracteres hexadecimales funciona como contraseña del pedido,
+    y la respuesta solo trae el estado, el historial y el tiempo restante.
+    Un token inexistente da 404, sin distinguir otros motivos.
+    """
+    permission_classes = [AllowAny]
+    # Sin autenticación: así un header Authorization vencido no produce un 401.
+    authentication_classes = []
+    # Limita las consultas por IP para que no se puedan probar tokens al azar.
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "seguimiento"
+    serializer_class = SeguimientoSerializer
+
+    @extend_schema(responses={200: SeguimientoSerializer, 404: None, 429: None})
+    def get(self, request, token):
+        pedido = get_object_or_404(
+            Pedido.objects.select_related("zona").prefetch_related("historial"),
+            token_seguimiento=token)
+        contexto = {"ahora": timezone.now(), "request": request}
+        return Response(SeguimientoSerializer(pedido, context=contexto).data)

@@ -13,6 +13,7 @@ Los restaurantes chicos asignan los pedidos "a ojo", no saben qué repartidor ll
 
 - Python 3 y Django 4.2
 - Django REST Framework
+- drf-spectacular (documentación OpenAPI / Swagger)
 - MariaDB / MySQL
 - Arquitectura REST, modelo de datos gestionado con migraciones de Django
 
@@ -48,7 +49,8 @@ python manage.py runserver
 python manage.py test daroth_app
 ```
 
-La API queda disponible en `http://127.0.0.1:8000/api/` y el panel de administración en `/admin/`.
+La API queda disponible en `http://127.0.0.1:8000/api/`, su documentación interactiva en
+`/docs/` (Swagger) y `/redoc/`, y el panel de administración en `/admin/`.
 
 Usuarios de prueba (contraseña `daroth123`): `paulo` y `aixa` son administradores;
 `marcos`, `julieta`, `federico`, `camila`, `nicolas`, `rocio`, `diego` y `valeria` son encargados.
@@ -56,7 +58,7 @@ Usuarios de prueba (contraseña `daroth123`): `paulo` y `aixa` son administrador
 ## API
 
 Todos los endpoints exigen autenticación con el encabezado `Authorization: Token <token>`,
-que se obtiene en el login.
+que se obtiene en el login. La única excepción es el seguimiento público.
 
 | Método | Ruta | Descripción |
 | --- | --- | --- |
@@ -71,10 +73,15 @@ que se obtiene en el login.
 | POST | `/api/pedidos/{id}/asignar/` | Asignación manual: `{"repartidor": 3}` |
 | POST | `/api/pedidos/{id}/desasignar/` | Quita el repartidor |
 | GET | `/api/dashboard/` | Pedidos activos, carga de repartidores y números del día |
+| GET | `/api/seguimiento/{token}/` | **Público.** Estado, historial y minutos restantes del pedido |
 
 Los estados avanzan en orden (Pendiente → Preparando → Listo → En camino → Entregado),
 sin saltear ni retroceder, y no se despacha un pedido sin repartidor. Una operación que no
 corresponde al estado actual responde **409 Conflict**.
+
+Cada pedido trae un `enlace_seguimiento` para mandarle al cliente. Esa página no pide login,
+muestra solo el estado y el tiempo restante (ningún dato interno) y admite hasta 30
+consultas por minuto por IP.
 
 Alta de un pedido: el total, la zona, el tiempo estimado y el token de seguimiento los calcula el sistema.
 
@@ -121,7 +128,7 @@ El desarrollo está organizado en cinco sprints de una semana:
 | --- | --- | --- |
 | 1 | Base del sistema y persistencia | Terminado |
 | 2 | Estados del pedido y asignación de repartidores | Terminado |
-| 3 | Seguimiento del pedido para el cliente | Pendiente |
+| 3 | Seguimiento del pedido para el cliente | Terminado |
 | 4 | Asignación inteligente y optimización | Pendiente |
 | 5 | Estadísticas y reportes | Pendiente |
 
